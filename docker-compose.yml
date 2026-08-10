@@ -1,0 +1,69 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scamshield
+      POSTGRES_PASSWORD: scamshield
+      POSTGRES_DB: scamshield
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scamshield"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      SCAMSHIELD_ENVIRONMENT: production
+      SCAMSHIELD_DEBUG: "false"
+      SCAMSHIELD_DATABASE_URL: postgresql+asyncpg://scamshield:scamshield@db:5432/scamshield
+      SCAMSHIELD_CORS_ORIGINS: '["http://localhost:3000"]'
+      SCAMSHIELD_STORAGE_BACKEND: local
+      SCAMSHIELD_STORAGE_LOCAL_PATH: /app/var/uploads
+      # No Whisper runtime in the default image — transcript-only mode.
+      # Add `asr` to the Dockerfile extras and set this to faster-whisper to
+      # enable audio upload.
+      SCAMSHIELD_TRANSCRIPTION_BACKEND: auto
+      # Point at the ollama service below once it is uncommented.
+      SCAMSHIELD_AGENTS_ENABLED: "false"
+      # SCAMSHIELD_AGENTS_ENABLED: "true"
+      # SCAMSHIELD_LLM_MODEL: ollama/llama3.1:8b
+      # SCAMSHIELD_LLM_BASE_URL: http://ollama:11434
+    volumes:
+      - backend-var:/app/var
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      # Server-side rewrite target; reached over the compose network.
+      NEXT_PUBLIC_API_BASE_URL: http://backend:8000
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+  # Uncomment to run the CrewAI agents locally with Llama 3.1.
+  # After `docker compose up -d ollama`, pull the model once:
+  #   docker compose exec ollama ollama pull llama3.1:8b
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+  #   ports:
+  #     - "11434:11434"
+
+volumes:
+  postgres-data:
+  backend-var:
+  # ollama-models:

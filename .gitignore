@@ -1,0 +1,43 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ---- Node / Next.js ----
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+.vercel
+
+# ---- Environment ----
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ---- ScamShield runtime artifacts ----
+backend/var/
+backend/artifacts/
+backend/data/chroma/
+backend/data/uploads/
+*.db
+*.sqlite3
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
