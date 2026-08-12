@@ -1,0 +1,30 @@
+{
+  "dataset": "Scam and Non-Scam Call Conversation Dataset",
+  "creators": [
+    "Brendan Hong Jun Zhi",
+    "Tee Connie"
+  ],
+  "source_url": "https://www.kaggle.com/datasets/teeconnie/scam-and-non-scam-call-conversation-dataset",
+  "dataset_doi": "10.34740/KAGGLE/DSV/11606256",
+  "license": "CC BY-NC-ND 4.0",
+  "related_paper": "https://doi.org/10.1109/ACCESS.2025.3582661",
+  "rows": 800,
+  "class_counts": {
+    "scam": 400,
+    "legitimate": 400
+  },
+  "unique_transcript_counts": {
+    "scam": 397,
+    "legitimate": 400
+  },
+  "processing": [
+    "Split blank-line-delimited transcript blocks",
+    "Removed numeric list ordinals from scam entries",
+    "Added label and source-category columns"
+  ],
+  "source_sha256": {
+    "English_Scam.txt": "2d432968afdf41f0245380aa1c4ad0c9827d1e0338d956035d386cc3d42d78a0",
+    "English_NonScam.txt": "34c21dbbe912e3b375ffbd9e1bdbb7444dcac6fea180b1a05f19d46b0c53da0a"
+  },
+  "output_sha256": "3c75b154f1de3cddf9f672516c850d8a401938c6165f3ec4ac7d3edb0a7ab4e2"
+}

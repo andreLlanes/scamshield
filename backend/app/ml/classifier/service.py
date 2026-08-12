@@ -15,6 +15,12 @@ from app.schemas.classification import ClassificationResult, FeatureContribution
 
 logger = get_logger(__name__)
 
+# Tree ensembles can produce a confident intercept-driven prediction even when
+# none of the input n-grams contributed meaningfully. Below this attribution
+# mass, use the conservative phrase scorer instead of presenting an unsupported
+# probability as model evidence.
+_MIN_ATTRIBUTION_MASS = 0.15
+
 
 class ScamClassifierService:
     """Loads the trained artifact once; degrades to the lexicon scorer."""
@@ -64,6 +70,7 @@ class ScamClassifierService:
             "model": f"tfidf+{artifact.estimator_name}",
             "trained": True,
             "metrics": artifact.metrics,
+            "provenance": artifact.provenance,
         }
 
     def reload(self) -> None:
@@ -80,6 +87,27 @@ class ScamClassifierService:
         try:
             probability = float(artifact.pipeline.predict_proba([text])[0][1])
             features = pipeline_module.explain(artifact.pipeline, text)
+            lexicon_probability, lexicon_hits = lexicon.score(text)
+            attribution_mass = sum(abs(weight) for _, weight, _ in features)
+            evidence_gate = attribution_mass < _MIN_ATTRIBUTION_MASS
+            if evidence_gate:
+                probability = lexicon_probability
+                existing = {name for name, _, _ in features}
+                lexicon_features = [
+                    (hit.entry.phrase, hit.entry.weight, hit.occurrences)
+                    for hit in lexicon_hits
+                    if hit.entry.phrase not in existing
+                ]
+                features = (lexicon_features + features)[:8]
+            elif lexicon.legitimate_disclaimer(text, lexicon_hits):
+                probability = min(probability, lexicon_probability)
+                existing = {name for name, _, _ in features}
+                disclaimer_features = [
+                    (hit.entry.phrase, hit.entry.weight, hit.occurrences)
+                    for hit in lexicon_hits
+                    if hit.entry.weight < 0 and hit.entry.phrase not in existing
+                ]
+                features = (disclaimer_features + features)[:8]
         except Exception as exc:
             logger.error("classifier_predict_failed", error=str(exc))
             return self._fallback(text)

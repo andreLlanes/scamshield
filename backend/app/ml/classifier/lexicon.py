@@ -138,6 +138,12 @@ _COMPILED: tuple[tuple[re.Pattern[str], LexiconEntry], ...] = tuple(
     if clean_text(entry.phrase)
 )
 
+_DIRECT_CREDENTIAL_REQUEST = re.compile(
+    r"\b(?:provide|give|share|read|tell|send|confirm|require|need)\b"
+    r".{0,80}\b(?:otp|one time password|verification code|password|pin|cvv|"
+    r"card number|credit card details|bank account number|account details)\b"
+)
+
 
 @dataclass(frozen=True)
 class LexiconHit:
@@ -173,3 +179,18 @@ def score(text: str) -> tuple[float, list[LexiconHit]]:
     probability = 1.0 / (1.0 + math.exp(-(total - 1.6) / 1.2))
     ranked = sorted(hits, key=lambda hit: abs(hit.entry.weight), reverse=True)
     return round(probability, 4), ranked
+
+
+def legitimate_disclaimer(text: str, hits: list[LexiconHit] | None = None) -> bool:
+    """Detect a strong safety disclaimer without a later credential request.
+
+    Bag-of-words models can mistake "we will never ask for your OTP" for an OTP
+    request. This narrow guardrail only handles that negation failure. It does
+    not apply when a request verb occurs near credential language, which keeps
+    scammers from bypassing the classifier with a reassuring preface.
+    """
+    matched = hits if hits is not None else match(text)
+    negative_weight = sum(
+        -hit.entry.weight * hit.occurrences for hit in matched if hit.entry.weight < 0
+    )
+    return negative_weight >= 1.0 and not _DIRECT_CREDENTIAL_REQUEST.search(clean_text(text))

@@ -86,7 +86,7 @@ python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
 pip install -e ".[ml]"           # API + classifier
-python -m scripts.train_classifier      # trains agent 2 from the seed corpus
+python -m scripts.train_classifier      # tunes and trains Agent 2 on 800 transcripts
 python -m scripts.seed_knowledge_base   # indexes agent 3's knowledge base
 
 uvicorn app.main:app --reload    # http://localhost:8000/docs
@@ -210,15 +210,31 @@ curl -X POST http://localhost:8000/api/v1/analyses/text \
 
 ## Training and knowledge base
 
-**Classifier.** `backend/data/training/calls.csv` is a 113-row seed corpus
-(`label,category,text`) that makes the pipeline demonstrable end to end. On a
-stratified hold-out it reaches roughly **0.83 accuracy / 0.85 F1 / 0.89 ROC-AUC** —
-a usable demo, not a production number. Point the trainer at a larger labelled
-corpus before quoting any figure as meaningful:
+**Classifier.** `backend/data/training/calls.csv` is the balanced 800-transcript
+Kaggle *Scam and Non-Scam Call Conversation Dataset* (400 per class), converted
+to `label,category,text`. The trainer reserves a stratified 20% test set, tunes
+TF-IDF and XGBoost hyperparameters with five-fold group-aware cross-validation on
+the remaining 80%, evaluates once on the untouched test set, then refits the
+selected pipeline on all 800 rows. Exact duplicate transcripts stay in the same
+partition. Dataset checksums, attribution, license, and processing steps are
+recorded in `backend/data/training/dataset_manifest.json`.
+
+A narrow deterministic negation guardrail prevents a known bag-of-words failure:
+legitimate warnings such as "we will never ask for your OTP" are not interpreted
+as credential requests. The guardrail is disabled when request language appears
+near a credential, so a reassuring preface cannot mask an actual request.
+Inference also rejects intercept-only confidence: if the trained trees produce
+almost no attributable phrase evidence, Agent 2 uses its conservative weighted
+phrase scorer instead of returning a high but unsupported XGBoost probability.
 
 ```bash
-python -m scripts.train_classifier --data path/to/your.csv --test-size 0.25
+python -m scripts.prepare_kaggle_dataset  # reproducibly rebuild calls.csv
+python -m scripts.train_classifier        # tune, evaluate, refit, save artifact
 ```
+
+Training writes `backend/artifacts/scam_classifier.joblib` and a human-readable
+`classifier_training_report.json` containing held-out metrics, selected
+hyperparameters, dataset checksums, and the full classification report.
 
 **Knowledge base.** `backend/data/knowledge_base/*.md` holds the documents Agent 3
 retrieves against, with `title` / `category` frontmatter. They are chunked on
@@ -295,12 +311,11 @@ Brings up PostgreSQL, the FastAPI backend on `:8000`, and the Next.js frontend o
   organisation on its published number.
 - **The knowledge base is finite.** Claims outside the indexed documents come back
   unverified rather than guessed at.
-- **The seed classifier is small.** 113 examples is enough to demonstrate the
-  pipeline, not to deploy. A side effect: on a corpus this size the trees split on
-  only a handful of terms, so Agent 2's per-phrase attributions are often sparse —
-  one or two terms rather than the eight it can display. This grows with the
-  dataset. The phrase-level explanation in the meantime comes from Agents 3 and 4,
-  which quote the recording directly.
+- **The classifier dataset is research-scale and partly augmented.** Its 800
+  English transcripts support a strong prototype evaluation, not unrestricted
+  production deployment. Test with real, consented, multilingual call data and
+  monitor drift before operational use. A low probability is not proof that a
+  call is safe.
 - Schema changes are applied with `create_all` on start-up; introduce Alembic
   before the schema changes under real data.
 

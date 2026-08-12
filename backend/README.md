@@ -9,7 +9,7 @@ FastAPI service hosting the five-agent analysis pipeline. See the
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[ml]"
 
-python -m scripts.train_classifier        # Agent 2 model artifact
+python -m scripts.train_classifier        # tune + train Agent 2 model artifact
 python -m scripts.seed_knowledge_base     # Agent 3 vector index
 
 uvicorn app.main:app --reload             # http://localhost:8000/docs
@@ -29,6 +29,10 @@ uvicorn app.main:app --reload             # http://localhost:8000/docs
 | `app/services/` | Analysis pipeline, risk scoring, storage backends |
 | `app/api/v1/` | HTTP endpoints |
 | `scripts/` | Training and knowledge-base seeding entry points |
+
+Agent 2 uses the balanced 800-transcript Kaggle corpus under `data/training/`.
+See that directory's README and manifest for attribution, license, checksums,
+and reproducible preparation instructions.
 
 ## Optional extras
 

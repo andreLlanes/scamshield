@@ -3,15 +3,16 @@
     python -m scripts.train_classifier
     python -m scripts.train_classifier --data data/training/calls.csv --test-size 0.25
 
-The bundled dataset in ``data/training/calls.csv`` is a small seed corpus meant
-to make the pipeline demonstrable end to end. Point ``--data`` at a larger
-labelled corpus before quoting any accuracy number as meaningful.
+The bundled ``calls.csv`` is generated from the cited 800-transcript Kaggle
+dataset. Hyperparameters are tuned only on the training partition; the held-out
+partition remains untouched until the final evaluation.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -60,6 +61,25 @@ def load_dataset(path: Path) -> tuple[list[str], list[int]]:
     return texts, labels
 
 
+def dataset_provenance(path: Path, texts: list[str], labels: list[int]) -> dict[str, object]:
+    """Record enough information to trace the exact data used by an artifact."""
+    try:
+        display_path = str(path.resolve().relative_to(BACKEND_ROOT))
+    except ValueError:
+        display_path = str(path)
+    provenance: dict[str, object] = {
+        "path": display_path,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "rows": len(texts),
+        "scam_rows": sum(labels),
+        "legitimate_rows": len(labels) - sum(labels),
+    }
+    manifest_path = path.with_name("dataset_manifest.json")
+    if manifest_path.exists():
+        provenance["manifest"] = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return provenance
+
+
 def main() -> int:
     settings = get_settings()
     configure_logging(settings)
@@ -77,8 +97,21 @@ def main() -> int:
         default=None,
         help="Where to write the joblib artifact (defaults to the configured path).",
     )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="Where to write the JSON training report (defaults beside the artifact).",
+    )
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--cv-folds", type=int, default=5)
+    parser.add_argument("--search-iterations", type=int, default=20)
+    parser.add_argument(
+        "--no-tune",
+        action="store_true",
+        help="Skip hyperparameter search and train with the documented defaults.",
+    )
     args = parser.parse_args()
 
     output = args.output or settings.resolve(settings.classifier_model_path)
@@ -93,18 +126,36 @@ def main() -> int:
     )
 
     artifact = pipeline_module.train(
-        texts, labels, test_size=args.test_size, random_state=args.seed
+        texts,
+        labels,
+        test_size=args.test_size,
+        random_state=args.seed,
+        tune=not args.no_tune,
+        cv_folds=args.cv_folds,
+        search_iterations=args.search_iterations,
+        provenance=dataset_provenance(args.data, texts, labels),
     )
     pipeline_module.save(artifact, output)
 
     metrics = {
         key: value for key, value in artifact.metrics.items() if key != "classification_report"
     }
+    report_path = args.report or output.with_name("classifier_training_report.json")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_payload = {
+        "estimator": artifact.estimator_name,
+        "artifact_version": artifact.version,
+        "metrics": artifact.metrics,
+        "provenance": artifact.provenance,
+    }
+    report_path.write_text(json.dumps(report_payload, indent=2) + "\n", encoding="utf-8")
+
     print("\n=== Held-out metrics ===")
     print(json.dumps(metrics, indent=2))
     print(artifact.metrics.get("classification_report", ""))
     print(f"Estimator : {artifact.estimator_name}")
     print(f"Artifact  : {output}")
+    print(f"Report    : {report_path}")
     return 0
 
 

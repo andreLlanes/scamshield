@@ -12,6 +12,7 @@ from typing import Any
 
 import joblib
 import numpy as np
+from sklearn.base import clone
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -22,7 +23,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import RandomizedSearchCV, StratifiedGroupKFold
 from sklearn.pipeline import Pipeline
 
 from app.core.logging import get_logger
@@ -30,7 +31,7 @@ from app.ml.classifier.preprocessing import clean_text
 
 logger = get_logger(__name__)
 
-ARTIFACT_VERSION = 1
+ARTIFACT_VERSION = 2
 
 
 @dataclass
@@ -44,6 +45,10 @@ class TrainingMetrics:
     roc_auc: float | None
     n_train: int
     n_test: int
+    cv_f1: float | None = None
+    cv_roc_auc: float | None = None
+    tuned: bool = False
+    best_params: dict[str, Any] = field(default_factory=dict)
     report: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -55,6 +60,10 @@ class TrainingMetrics:
             "roc_auc": round(self.roc_auc, 4) if self.roc_auc is not None else None,
             "n_train": self.n_train,
             "n_test": self.n_test,
+            "cv_f1": round(self.cv_f1, 4) if self.cv_f1 is not None else None,
+            "cv_roc_auc": round(self.cv_roc_auc, 4) if self.cv_roc_auc is not None else None,
+            "tuned": self.tuned,
+            "best_params": self.best_params,
         }
 
 
@@ -65,6 +74,7 @@ class TrainedArtifact:
     pipeline: Pipeline
     metrics: dict[str, Any] = field(default_factory=dict)
     estimator_name: str = "xgboost"
+    provenance: dict[str, Any] = field(default_factory=dict)
     version: int = ARTIFACT_VERSION
 
 
@@ -129,26 +139,119 @@ def build_pipeline(n_samples: int) -> tuple[Pipeline, str]:
     return Pipeline([("tfidf", _build_vectorizer(n_samples)), ("clf", estimator)]), name
 
 
+def _search_space(estimator_name: str) -> dict[str, list[Any]]:
+    """A compact, reproducible search space for an 800-row text corpus."""
+    common: dict[str, list[Any]] = {
+        "tfidf__ngram_range": [(1, 1), (1, 2), (1, 3)],
+        "tfidf__min_df": [1, 2, 3],
+        "tfidf__max_df": [0.9, 1.0],
+        "tfidf__sublinear_tf": [True, False],
+    }
+    if estimator_name == "xgboost":
+        common.update(
+            {
+                "clf__n_estimators": [200, 300, 450, 600],
+                "clf__max_depth": [2, 3, 4],
+                "clf__learning_rate": [0.03, 0.05, 0.1],
+                "clf__subsample": [0.8, 0.9, 1.0],
+                "clf__colsample_bytree": [0.6, 0.8, 1.0],
+                "clf__min_child_weight": [1, 2, 4],
+                "clf__reg_lambda": [1.0, 1.5, 2.0],
+            }
+        )
+    else:
+        common.update(
+            {
+                "clf__C": [0.5, 1.0, 2.0, 4.0, 8.0],
+                "clf__class_weight": [None, "balanced"],
+            }
+        )
+    return common
+
+
+def _json_safe_params(params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: list(value) if isinstance(value, tuple) else value
+        for key, value in sorted(params.items())
+    }
+
+
 def train(
     texts: list[str],
     labels: list[int],
     *,
     test_size: float = 0.2,
     random_state: int = 42,
+    tune: bool = True,
+    cv_folds: int = 5,
+    search_iterations: int = 20,
+    provenance: dict[str, Any] | None = None,
 ) -> TrainedArtifact:
-    """Fit the pipeline and measure it on a stratified hold-out split."""
+    """Tune on the training split, then measure once on a held-out test split."""
     if len(texts) != len(labels):
         raise ValueError("texts and labels must be the same length")
     if len(set(labels)) < 2:
         raise ValueError("Training data must contain both scam (1) and legitimate (0) examples")
 
-    x_train, x_test, y_train, y_test = train_test_split(
-        texts, labels, test_size=test_size, random_state=random_state, stratify=labels
+    if not 0.0 < test_size < 1.0:
+        raise ValueError("test_size must be between 0 and 1")
+
+    # Exact duplicates exist in the published corpus. Keep every identical
+    # transcript in the same partition so a duplicate cannot inflate test scores.
+    groups = [clean_text(text) for text in texts]
+    test_folds = max(2, round(1.0 / test_size))
+    holdout = StratifiedGroupKFold(
+        n_splits=test_folds, shuffle=True, random_state=random_state
     )
+    train_indices, test_indices = next(holdout.split(texts, labels, groups))
+    x_train = [texts[index] for index in train_indices]
+    x_test = [texts[index] for index in test_indices]
+    y_train = [labels[index] for index in train_indices]
+    y_test = [labels[index] for index in test_indices]
+    train_groups = [groups[index] for index in train_indices]
 
     pipeline, estimator_name = build_pipeline(len(texts))
-    logger.info("classifier_training", estimator=estimator_name, n_train=len(x_train))
-    pipeline.fit(x_train, y_train)
+    cv_f1: float | None = None
+    cv_roc_auc: float | None = None
+    best_params: dict[str, Any] = {}
+    tuned = False
+
+    if tune and search_iterations > 0 and min(np.bincount(y_train)) >= cv_folds:
+        logger.info(
+            "classifier_tuning",
+            estimator=estimator_name,
+            n_train=len(x_train),
+            folds=cv_folds,
+            iterations=search_iterations,
+        )
+        search = RandomizedSearchCV(
+            estimator=pipeline,
+            param_distributions=_search_space(estimator_name),
+            n_iter=search_iterations,
+            scoring={"f1": "f1", "roc_auc": "roc_auc"},
+            refit="f1",
+            cv=StratifiedGroupKFold(
+                n_splits=cv_folds, shuffle=True, random_state=random_state
+            ),
+            random_state=random_state,
+            n_jobs=-1,
+            return_train_score=False,
+        )
+        search.fit(x_train, y_train, groups=train_groups)
+        pipeline = search.best_estimator_
+        cv_f1 = float(search.best_score_)
+        cv_roc_auc = float(search.cv_results_["mean_test_roc_auc"][search.best_index_])
+        best_params = _json_safe_params(search.best_params_)
+        tuned = True
+        logger.info(
+            "classifier_tuned",
+            cv_f1=round(cv_f1, 4),
+            cv_roc_auc=round(cv_roc_auc, 4),
+            best_params=best_params,
+        )
+    else:
+        logger.info("classifier_training", estimator=estimator_name, n_train=len(x_train))
+        pipeline.fit(x_train, y_train)
 
     predictions = pipeline.predict(x_test)
     try:
@@ -165,6 +268,10 @@ def train(
         roc_auc=roc_auc,
         n_train=len(x_train),
         n_test=len(x_test),
+        cv_f1=cv_f1,
+        cv_roc_auc=cv_roc_auc,
+        tuned=tuned,
+        best_params=best_params,
         report=classification_report(
             y_test, predictions, target_names=["legitimate", "scam"], zero_division=0
         ),
@@ -172,13 +279,14 @@ def train(
     logger.info("classifier_trained", **metrics.as_dict())
 
     # Refit on the full dataset now that the honest estimate is recorded.
-    final_pipeline, _ = build_pipeline(len(texts))
+    final_pipeline = clone(pipeline)
     final_pipeline.fit(texts, labels)
 
     return TrainedArtifact(
         pipeline=final_pipeline,
         metrics={**metrics.as_dict(), "classification_report": metrics.report},
         estimator_name=estimator_name,
+        provenance=provenance or {},
     )
 
 
@@ -190,6 +298,7 @@ def save(artifact: TrainedArtifact, path: Path) -> Path:
             "pipeline": artifact.pipeline,
             "metrics": artifact.metrics,
             "estimator_name": artifact.estimator_name,
+            "provenance": artifact.provenance,
         },
         path,
         compress=3,
@@ -209,6 +318,7 @@ def load(path: Path) -> TrainedArtifact:
         pipeline=payload["pipeline"],
         metrics=payload.get("metrics", {}),
         estimator_name=payload.get("estimator_name", "unknown"),
+        provenance=payload.get("provenance", {}),
         version=version,
     )
 
